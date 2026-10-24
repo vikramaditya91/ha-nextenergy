@@ -5,6 +5,13 @@ backend is reachable at https://mijn.nextenergy.nl. This module speaks the same
 "screenservices" JSON protocol the app uses. It has no Home Assistant imports so
 it can be exercised from a plain Python script (see tools/probe.py).
 
+The usage screen works in two steps, and so does this client: the ``Usage_GetData``
+server action returns the contract and screen variables the widget keeps in its
+model, and the ``GetUsageData`` data action then expects exactly those records in
+its ``screenData``. Calling the data action without them fails with a generic
+"Something went wrong". Contract id 0 means "the logged-in account's contract",
+which is what the app itself sends.
+
 Every request carries ``versionInfo`` with the module version (fetched at login)
 and an ``apiVersion`` that is specific to each server action. Those hashes are
 copied from the app bundles and change whenever NextEnergy redeploys; when a
@@ -46,6 +53,12 @@ ACTION_CONTRACT_SYNC = (
     "qUSD+Sc+GuaGYdDHGUX1aQ",
     "MainFlow.Usage",
 )
+ACTION_USAGE_SCREEN = (
+    f"{SCREENSERVICES}/Mobile_EnergyNext_CW/WidgetFlow/Usage_QuarterlyPrices_v2"
+    "/ActionUsage_GetData",
+    "IkZvZs2aMH7OvfTv2DIswQ",
+    "MainFlow.Usage",
+)
 ACTION_USAGE_FILTERS = (
     f"{SCREENSERVICES}/Mobile_EnergyNext_CW/WidgetFlow/Usage_QuarterlyPrices_v2"
     "/DataActionGetFilterLabels",
@@ -61,7 +74,15 @@ ACTION_USAGE_DATA = (
 
 SESSION_COOKIE = "nr2Users_Customers"
 _CSRF_RE = re.compile(r"crf=([^;]+)")
-_TIME_RE = re.compile(r"(\d{1,2})[:.](\d{2})")
+_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})")
+
+# Static entity ids from the app's module manifest.
+DISTRIBUTION_HOUR = 3  # one data point per hour of the selected day
+UTILITY_GAS = 1
+UTILITY_ELECTRICITY = 2
+# DayStatusId values seen on the hourly view: "" when data is present, "MISS"
+# when the grid operator has not delivered the day (yet).
+STATUS_MISSING = "MISS"
 
 
 class NextEnergyError(Exception):
@@ -120,9 +141,11 @@ class DayUsage:
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
-    def complete(self) -> bool:
-        """True when NextEnergy marks the day as final rather than missing/estimated."""
-        return self.status.lower().startswith("complete")
+    def has_data(self) -> bool:
+        """True when NextEnergy delivered readings for the day."""
+        return self.status != STATUS_MISSING and bool(
+            self.electricity or self.electricity_return or self.gas
+        )
 
 
 def _dec(value: Any) -> Decimal:
@@ -155,19 +178,20 @@ class NextEnergyClient:
         self._device_id = device_id or str(uuid.uuid5(uuid.NAMESPACE_DNS, username))
         self._module_version: str | None = None
         self._csrf: str | None = None
+        self._screen: dict[str, Any] | None = None
         self._lock = asyncio.Lock()
 
     # ----- plumbing -------------------------------------------------------
 
     def _headers(self) -> dict[str, str]:
-        headers = {
+        # The runtime always sends X-CSRFToken, empty before login. Leaving the
+        # header out makes the backend answer "Invalid Login" to valid credentials.
+        return {
             "Content-Type": "application/json; charset=UTF-8",
             "Accept": "application/json",
             "OutSystems-locale": "nl-NL",
+            "X-CSRFToken": self._csrf or "",
         }
-        if self._csrf:
-            headers["X-CSRFToken"] = self._csrf
-        return headers
 
     async def _post(self, action: tuple[str, str, str], body: dict[str, Any]) -> dict[str, Any]:
         url, api_version, view_name = action
@@ -191,7 +215,7 @@ class NextEnergyClient:
         return data
 
     async def _refresh_module_version(self) -> None:
-        async with self._session.get(LOGIN_PAGE) as resp:
+        async with self._session.get(LOGIN_PAGE, headers={"Accept": "text/html"}) as resp:
             if resp.status != 200:
                 raise NextEnergyError(f"login page returned HTTP {resp.status}")
         params = {str(int(time.time() * 1000)): ""}
@@ -236,6 +260,7 @@ class NextEnergyClient:
             return await self._post(action, body)
         except AuthenticationError:
             self._csrf = None
+            self._screen = None
             await self.login()
             return await self._post(action, body)
 
@@ -273,7 +298,25 @@ class NextEnergyClient:
             )
         ]
 
-    def _usage_body(self, contract_id: int, day: date) -> dict[str, Any]:
+    async def _usage_screen(self, day: date) -> dict[str, Any]:
+        """Contract and screen variables the usage data action expects to see.
+
+        The app loads these once from local storage or from ``Usage_GetData``.
+        They only change when the contract changes, so they are cached per client.
+        """
+        if self._screen is None:
+            # The server action only accepts 0 here and resolves the contract
+            # from the session; passing the real id answers "Contract or
+            # account does not exist".
+            data = await self._call(
+                ACTION_USAGE_SCREEN,
+                {"inputParameters": {"In_ContractId": 0, "In_PriceDate": day.isoformat()}},
+            )
+            self._screen = data.get("data", {})
+        return self._screen
+
+    async def _usage_body(self, contract_id: int, day: date, utility: int) -> dict[str, Any]:
+        screen = await self._usage_screen(day)
         return {
             "screenData": {
                 "variables": {
@@ -281,62 +324,96 @@ class NextEnergyClient:
                     "_in_ContractIdInDataFetchStatus": 1,
                     "In_DateTime": f"{day.isoformat()}T00:00:00Z",
                     "_in_DateTimeInDataFetchStatus": 1,
+                    "ScreenVariables": screen.get("Out_ScreenVariables", {}),
+                    "ContractInfo": screen.get("Out_ContractInfo", {}),
+                    "ViewVariables": {"SeenElec": True, "SeenGas": True},
                 }
             },
             "clientVariables": {
                 "UsageDate": day.isoformat(),
                 "UsageYear": day.year,
+                "DistributionId": DISTRIBUTION_HOUR,
+                "UsageUtilityTypeId": utility,
+                "UsageCostLevelId": "",
+                "PriceCostLevel": "",
+                "PriceDate": day.isoformat(),
             },
         }
 
     async def get_usage_filters(self, contract_id: int, day: date) -> dict[str, Any]:
-        """Return the raw filter options the app offers (utility types, granularity)."""
-        data = await self._call(ACTION_USAGE_FILTERS, self._usage_body(contract_id, day))
+        """Return the filter labels the app shows (useful when debugging ids)."""
+        body = await self._usage_body(contract_id, day, UTILITY_ELECTRICITY)
+        data = await self._call(ACTION_USAGE_FILTERS, body)
         return data.get("data", {})
 
-    async def get_usage_raw(self, contract_id: int, day: date) -> dict[str, Any]:
-        """Return the raw usage payload for one day."""
-        data = await self._call(ACTION_USAGE_DATA, self._usage_body(contract_id, day))
+    async def get_usage_raw(self, contract_id: int, day: date, utility: int) -> dict[str, Any]:
+        """Return the raw usage payload for one day and one utility type."""
+        body = await self._usage_body(contract_id, day, utility)
+        data = await self._call(ACTION_USAGE_DATA, body)
         return data.get("data", {})
 
     async def get_usage(self, contract_id: int, day: date) -> DayUsage:
-        """Return parsed usage for one day."""
-        return parse_day(day, await self.get_usage_raw(contract_id, day))
+        """Return parsed usage for one day: electricity, and gas when the contract has it."""
+        screen = await self._usage_screen(day)
+        variables = screen.get("Out_ScreenVariables", {})
+        payloads = [await self.get_usage_raw(contract_id, day, UTILITY_ELECTRICITY)]
+        if variables.get("HasGas"):
+            payloads.append(await self.get_usage_raw(contract_id, day, UTILITY_GAS))
+        return parse_day(day, payloads)
 
 
 # ----- parsing ------------------------------------------------------------
 
 
+def _records(value: Any) -> list[dict[str, Any]]:
+    """OutSystems serialises record lists as {"List": [...], "EmptyListItem": {...}}."""
+    if isinstance(value, dict):
+        return list(value.get("List") or [])
+    return list(value or [])
+
+
 def _series_bucket(name: str) -> str | None:
     n = name.lower()
+    if n in ("", "empty"):
+        return None
     if "gas" in n:
         return "gas"
     if "terug" in n or "return" in n or "productie" in n or "opwek" in n:
         return "return"
-    if any(k in n for k in ("verbruik", "stroom", "elek", "elec", "levering", "usage")):
+    if any(k in n for k in ("stroom", "verbruik", "elek", "elec", "levering", "usage")):
         return "electricity"
     return None
 
 
 def _label_time(label: str) -> dtime | None:
-    match = _TIME_RE.search(label)
+    """Hourly labels look like "13:00:00"; day and month views use other labels."""
+    match = _TIME_RE.match(label.strip())
     if not match:
         return None
     hour, minute = int(match.group(1)), int(match.group(2))
-    if hour == 24:
+    if hour > 23:
         return None
     return dtime(hour, minute)
 
 
-def parse_day(day: date, data: dict[str, Any]) -> DayUsage:
-    """Turn the GetUsageData payload into a DayUsage.
+def _scaled(points: dict[dtime, Decimal], total: Decimal) -> dict[dtime, Decimal]:
+    """Stretch rounded per-hour values so they add up to the exact day total."""
+    current = sum(points.values(), Decimal(0))
+    if not points or not current or not total:
+        return points
+    factor = total / current
+    return {when: value * factor for when, value in points.items()}
 
-    Interval values come from ``DataPoints`` (Label/Value/SeriesName records,
-    which is what the app's chart plots). Day totals come from
-    ``TotalsPerPeriod`` and are authoritative; intervals are only used to spread
-    the day over the hours in Home Assistant's statistics.
+
+def parse_day(day: date, payloads: list[dict[str, Any]]) -> DayUsage:
+    """Turn one or more GetUsageData payloads (one per utility type) into a DayUsage.
+
+    Per-hour values come from ``DataPoints`` (Label/Value/SeriesName records, the
+    same ones the app's chart plots, rounded to two decimals). Day totals come
+    from ``TotalsPerPeriod``, which is identical in every payload for the same day
+    and is authoritative; the hourly values are scaled to match it.
     """
-    totals_raw = data.get("TotalsPerPeriod") or {}
+    totals_raw = payloads[0].get("TotalsPerPeriod") or {}
     elec = totals_raw.get("Elec") or {}
     gas = totals_raw.get("Gas") or {}
     totals = Totals(
@@ -350,21 +427,26 @@ def parse_day(day: date, data: dict[str, Any]) -> DayUsage:
         gas_total_eur=_dec(totals_raw.get("TotalGasEuro")),
     )
     buckets: dict[str, dict[dtime, Decimal]] = {"electricity": {}, "return": {}, "gas": {}}
-    for point in data.get("DataPoints") or []:
-        when = _label_time(str(point.get("Label", "")))
-        bucket = _series_bucket(str(point.get("SeriesName", "")))
-        if when is None or bucket is None:
-            continue
-        buckets[bucket][when] = buckets[bucket].get(when, Decimal(0)) + _dec(point.get("Value"))
+    status = ""
+    smart = False
+    for data in payloads:
+        status = status or str(data.get("DayStatusId") or "")
+        smart = smart or bool(data.get("Out_IsSmartMeter", False))
+        for point in _records(data.get("DataPoints")):
+            when = _label_time(str(point.get("Label", "")))
+            bucket = _series_bucket(str(point.get("SeriesName", "")))
+            if when is None or bucket is None:
+                continue
+            buckets[bucket][when] = buckets[bucket].get(when, Decimal(0)) + _dec(point.get("Value"))
     return DayUsage(
         day=day,
-        status=str(data.get("DayStatusId") or ""),
-        is_smart_meter=bool(data.get("Out_IsSmartMeter", False)),
+        status=status,
+        is_smart_meter=smart,
         totals=totals,
-        electricity=buckets["electricity"],
-        electricity_return=buckets["return"],
-        gas=buckets["gas"],
-        raw=data,
+        electricity=_scaled(buckets["electricity"], totals.electricity_kwh),
+        electricity_return=_scaled(buckets["return"], totals.return_kwh),
+        gas=_scaled(buckets["gas"], totals.gas_m3),
+        raw={"payloads": payloads},
     )
 
 

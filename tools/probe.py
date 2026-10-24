@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import sys
@@ -24,10 +25,16 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "custom_components"))
+import aiohttp
 
-import aiohttp  # noqa: E402
-from nextenergy_nl.api import NextEnergyClient  # noqa: E402
+# Load api.py on its own: importing the package would pull in Home Assistant.
+_API_PATH = Path(__file__).resolve().parents[1] / "custom_components" / "nextenergy_nl" / "api.py"
+_spec = importlib.util.spec_from_file_location("nextenergy_api", _API_PATH)
+assert _spec and _spec.loader
+_api = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _api  # dataclasses resolve annotations through sys.modules
+_spec.loader.exec_module(_api)
+NextEnergyClient = _api.NextEnergyClient
 
 
 def _load_env(path: str | None) -> None:
@@ -69,8 +76,16 @@ async def main() -> int:
         out = {
             "contract": contract.__dict__,
             "filters": await client.get_usage_filters(contract.contract_id, day),
-            "usage_raw": await client.get_usage_raw(contract.contract_id, day),
+            "usage_raw": {
+                "electricity": await client.get_usage_raw(
+                    contract.contract_id, day, _api.UTILITY_ELECTRICITY
+                ),
+            },
         }
+        if contract.has_gas:
+            out["usage_raw"]["gas"] = await client.get_usage_raw(
+                contract.contract_id, day, _api.UTILITY_GAS
+            )
         parsed = await client.get_usage(contract.contract_id, day)
         out["usage_parsed"] = {
             "day": parsed.day,

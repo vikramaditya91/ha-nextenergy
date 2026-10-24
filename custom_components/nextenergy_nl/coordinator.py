@@ -152,7 +152,7 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
         day = first_day
         while day <= yesterday:
             usage = await self.client.get_usage(self.contract.contract_id, day)
-            if usage.complete or usage.totals.electricity_kwh or usage.totals.gas_m3:
+            if usage.has_data:
                 await self._write_day(meta, usage)
                 latest = usage
             else:
@@ -162,6 +162,9 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
 
     async def _write_day(self, meta: dict[str, StatisticMetaData], usage: DayUsage) -> None:
         """Write one day's hourly statistics, continuing each running sum.
+
+        Cost series carry NextEnergy's all-in day total (energy, tax and fixed
+        costs), spread over the hours in proportion to the volume.
 
         Interval values are grouped per hour. When NextEnergy only gives a day
         total (non-smart meter, or data points missing), the total is booked on
@@ -174,9 +177,11 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
             "electricity": (usage.electricity, usage.totals.electricity_kwh),
             "electricity_cost": (
                 _scale(
-                    usage.electricity, usage.totals.electricity_kwh, usage.totals.electricity_cost
+                    usage.electricity,
+                    usage.totals.electricity_kwh,
+                    usage.totals.electricity_total_eur,
                 ),
-                usage.totals.electricity_cost,
+                usage.totals.electricity_total_eur,
             ),
             "return": (usage.electricity_return, usage.totals.return_kwh),
             "return_compensation": (
@@ -185,8 +190,8 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
             ),
             "gas": (usage.gas, usage.totals.gas_m3),
             "gas_cost": (
-                _scale(usage.gas, usage.totals.gas_m3, usage.totals.gas_cost),
-                usage.totals.gas_cost,
+                _scale(usage.gas, usage.totals.gas_m3, usage.totals.gas_total_eur),
+                usage.totals.gas_total_eur,
             ),
         }
         for kind, metadata in meta.items():

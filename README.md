@@ -4,9 +4,9 @@ Brings your [NextEnergy](https://www.nextenergy.nl) smart-meter usage into Home 
 including the Energy dashboard.
 
 NextEnergy has no public API and no web portal; everything lives in their app. This
-integration talks to the same backend the app uses and imports the quarter-hour
-electricity and gas readings NextEnergy receives from your grid operator, together with
-the costs NextEnergy calculated for them at your tariff.
+integration talks to the same backend the app uses and imports the hourly electricity
+and gas readings NextEnergy receives from your grid operator, together with the costs
+NextEnergy calculated for them at your tariff.
 
 > Data arrives about one day late. That is how the Dutch smart-meter chain works: the
 > grid operator collects yesterday's intervals overnight and hands them to the supplier.
@@ -20,11 +20,11 @@ the costs NextEnergy calculated for them at your tariff.
 | Statistic | Unit |
 |---|---|
 | Electricity consumption | kWh |
-| Electricity cost | EUR |
+| Electricity cost (energy, tax and fixed costs, as NextEnergy bills them) | EUR |
 | Electricity returned to the grid (if your contract has it) | kWh |
 | Return compensation (if your contract has it) | EUR |
 | Gas consumption (if your contract has it) | m³ |
-| Gas cost (if your contract has it) | EUR |
+| Gas cost, all-in (if your contract has it) | EUR |
 
 Pick them in **Settings → Dashboards → Energy** as grid consumption, return and gas sources.
 Costs use the "use an entity tracking the total costs" option.
@@ -57,9 +57,12 @@ If you change your password in the app, Home Assistant asks you to re-authentica
 
 The NextEnergy app is an OutSystems application. Its backend at `mijn.nextenergy.nl`
 exposes the screens' data actions as JSON endpoints. This integration logs in the way the
-app does, syncs the contract, and calls the usage data action for each day. It writes the
-result as external statistics, the same mechanism Home Assistant's built-in Opower
-integration uses for day-old utility data.
+app does, syncs the contract, and calls the usage screen's data action for each day with
+the hourly view selected. It writes the result as external statistics, the same mechanism
+Home Assistant's built-in Opower integration uses for day-old utility data.
+
+The per-hour values NextEnergy returns are rounded to two decimals; the integration scales
+them so each day adds up to the exact day total the app shows.
 
 Polling happens every six hours. The last three days are always re-checked because the grid
 operator sometimes delivers a day late or corrects it afterwards. Re-imports replace the
@@ -71,10 +74,13 @@ written stay. Please open an issue with the log line.
 
 ## Development
 
-`tools/probe.py` exercises the client without Home Assistant and dumps the raw payloads:
+`tools/probe.py` exercises the client without Home Assistant and dumps the raw payloads.
+It only needs `aiohttp`:
 
 ```sh
 NE_USERNAME=you@example.com NE_PASSWORD=... uv run --with aiohttp tools/probe.py 2026-10-20
+# or, with the credentials in a file of NE_USERNAME=/NE_PASSWORD= lines:
+uv run --with aiohttp tools/probe.py --env ~/.config/nextenergy.env 2026-10-20
 ```
 
 Lint with `ruff check .`.
