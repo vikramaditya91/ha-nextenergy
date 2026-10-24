@@ -64,7 +64,7 @@ Home Assistant's built-in Opower integration uses for day-old utility data.
 The per-hour values NextEnergy returns are rounded to two decimals; the integration scales
 them so each day adds up to the exact day total the app shows.
 
-Polling happens every six hours. The last three days are always re-checked because the grid
+Polling happens every six hours. The last seven days are always re-checked because the grid
 operator sometimes delivers a day late or corrects it afterwards. Re-imports replace the
 day's hourly values and recompute the running sums, so nothing is double counted.
 

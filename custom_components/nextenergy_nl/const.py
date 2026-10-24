@@ -16,4 +16,4 @@ UPDATE_INTERVAL = timedelta(hours=6)
 INITIAL_BACKFILL_DAYS = 30
 # How many days back to re-check on every run: days can arrive late or be
 # re-issued by the grid operator with corrected values.
-RECHECK_DAYS = 3
+RECHECK_DAYS = 7
