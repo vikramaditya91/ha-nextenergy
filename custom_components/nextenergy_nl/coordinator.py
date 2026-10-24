@@ -8,7 +8,11 @@ from decimal import Decimal
 from typing import Any
 
 from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+)
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
@@ -75,54 +79,60 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
         meta: dict[str, StatisticMetaData] = {}
         if c.has_electricity:
             meta["electricity"] = StatisticMetaData(
-                has_mean=False,
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 source=DOMAIN,
                 statistic_id=self._stat_id("electricity"),
                 name=f"{name} electricity",
                 unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+                unit_class="energy",
             )
             meta["electricity_cost"] = StatisticMetaData(
-                has_mean=False,
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 source=DOMAIN,
                 statistic_id=self._stat_id("electricity_cost"),
                 name=f"{name} electricity cost",
                 unit_of_measurement="EUR",
+                unit_class=None,
             )
         if c.has_return:
             meta["return"] = StatisticMetaData(
-                has_mean=False,
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 source=DOMAIN,
                 statistic_id=self._stat_id("return"),
                 name=f"{name} electricity return",
                 unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+                unit_class="energy",
             )
             meta["return_compensation"] = StatisticMetaData(
-                has_mean=False,
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 source=DOMAIN,
                 statistic_id=self._stat_id("return_compensation"),
                 name=f"{name} return compensation",
                 unit_of_measurement="EUR",
+                unit_class=None,
             )
         if c.has_gas:
             meta["gas"] = StatisticMetaData(
-                has_mean=False,
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 source=DOMAIN,
                 statistic_id=self._stat_id("gas"),
                 name=f"{name} gas",
                 unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+                unit_class="volume",
             )
             meta["gas_cost"] = StatisticMetaData(
-                has_mean=False,
+                mean_type=StatisticMeanType.NONE,
                 has_sum=True,
                 source=DOMAIN,
                 statistic_id=self._stat_id("gas_cost"),
                 name=f"{name} gas cost",
                 unit_of_measurement="EUR",
+                unit_class=None,
             )
         return meta
 
