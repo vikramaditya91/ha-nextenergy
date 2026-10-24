@@ -1,0 +1,13 @@
+{
+  "domain": "nextenergy_nl",
+  "name": "NextEnergy",
+  "codeowners": ["@vikramaditya91"],
+  "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/vikramaditya91/ha-nextenergy",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/vikramaditya91/ha-nextenergy/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

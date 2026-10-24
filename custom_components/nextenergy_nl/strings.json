@@ -1,0 +1,38 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "NextEnergy account",
+        "description": "Sign in with the e-mail address and password you use in the NextEnergy app.",
+        "data": {
+          "username": "E-mail address",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate NextEnergy",
+        "description": "The password for {username} no longer works. Enter the current one.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "NextEnergy rejected the e-mail address or password.",
+      "cannot_connect": "Could not reach the NextEnergy backend."
+    },
+    "abort": {
+      "already_configured": "This contract is already set up.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_day": { "name": "Last reported day" },
+      "electricity_last_day": { "name": "Electricity last day" },
+      "return_last_day": { "name": "Electricity returned last day" },
+      "gas_last_day": { "name": "Gas last day" },
+      "cost_last_day": { "name": "Cost last day" }
+    }
+  }
+}
