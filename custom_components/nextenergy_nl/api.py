@@ -32,12 +32,16 @@ from datetime import time as dtime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
 BASE_URL = "https://mijn.nextenergy.nl/Mobile_EnergyNext"
+# NextEnergy reports days and hours in Dutch local time, whatever the client's zone.
+NEXTENERGY_TZ = ZoneInfo("Europe/Amsterdam")
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 LOGIN_PAGE = f"{BASE_URL}/Login"
 MODULE_VERSION_URL = f"{BASE_URL}/moduleservices/moduleversioninfo"
 SCREENSERVICES = f"{BASE_URL}/screenservices"
@@ -95,6 +99,10 @@ class AuthenticationError(NextEnergyError):
 
 class ApiVersionError(NextEnergyError):
     """The backend no longer accepts the action versions this client sends."""
+
+
+class NoContractError(NextEnergyError):
+    """The account logs in but has no energy contract to read usage for."""
 
 
 @dataclass(frozen=True)
@@ -200,10 +208,15 @@ class NextEnergyClient:
             "viewName": view_name,
             **body,
         }
-        async with self._session.post(url, json=payload, headers=self._headers()) as resp:
-            if resp.status != 200:
-                raise NextEnergyError(f"{url} returned HTTP {resp.status}")
-            data = await resp.json(content_type=None)
+        try:
+            async with self._session.post(
+                url, json=payload, headers=self._headers(), timeout=REQUEST_TIMEOUT
+            ) as resp:
+                if resp.status != 200:
+                    raise NextEnergyError(f"{url} returned HTTP {resp.status}")
+                data = await resp.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            raise NextEnergyError(f"request to {url} failed: {err}") from err
         exc = data.get("exception") or {}
         if exc:
             message = exc.get("message", "unknown error")
@@ -215,12 +228,19 @@ class NextEnergyClient:
         return data
 
     async def _refresh_module_version(self) -> None:
-        async with self._session.get(LOGIN_PAGE, headers={"Accept": "text/html"}) as resp:
-            if resp.status != 200:
-                raise NextEnergyError(f"login page returned HTTP {resp.status}")
         params = {str(int(time.time() * 1000)): ""}
-        async with self._session.get(MODULE_VERSION_URL, params=params) as resp:
-            data = await resp.json(content_type=None)
+        try:
+            async with self._session.get(
+                LOGIN_PAGE, headers={"Accept": "text/html"}, timeout=REQUEST_TIMEOUT
+            ) as resp:
+                if resp.status != 200:
+                    raise NextEnergyError(f"login page returned HTTP {resp.status}")
+            async with self._session.get(
+                MODULE_VERSION_URL, params=params, timeout=REQUEST_TIMEOUT
+            ) as resp:
+                data = await resp.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            raise NextEnergyError(f"could not reach {BASE_URL}: {err}") from err
         self._module_version = data.get("versionToken")
         if not self._module_version:
             raise NextEnergyError("module version token missing")
@@ -273,7 +293,9 @@ class NextEnergyClient:
         data = await self._call(ACTION_CONTRACT_SYNC, {"inputParameters": {}})
         if not data.get("data", {}).get("IsSuccess", True):
             raise NextEnergyError("contract sync reported failure")
-        c = data["data"]["SyncContractData"]
+        c = data["data"].get("SyncContractData") or {}
+        if not int(c.get("ContractId") or 0):
+            raise NoContractError("account has no energy contract")
         lines = data["data"].get("SyncContractlineIntervals", {})
         props = data["data"].get("SyncContractProperties", {})
         return [

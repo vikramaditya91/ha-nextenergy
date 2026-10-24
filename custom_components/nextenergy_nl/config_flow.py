@@ -11,7 +11,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
-from .api import AuthenticationError, NextEnergyClient, NextEnergyError
+from .api import AuthenticationError, NextEnergyClient, NextEnergyError, NoContractError
 from .const import CONF_CONTRACT_ID, CONF_CONTRACT_NUMBER, DOMAIN
 
 STEP_USER_SCHEMA = vol.Schema({vol.Required(CONF_USERNAME): str, vol.Required(CONF_PASSWORD): str})
@@ -46,6 +46,8 @@ class NextEnergyConfigFlow(ConfigFlow, domain=DOMAIN):
                 data = await self._validate(user_input[CONF_USERNAME], user_input[CONF_PASSWORD])
             except AuthenticationError:
                 errors["base"] = "invalid_auth"
+            except NoContractError:
+                errors["base"] = "no_contract"
             except NextEnergyError:
                 errors["base"] = "cannot_connect"
             else:

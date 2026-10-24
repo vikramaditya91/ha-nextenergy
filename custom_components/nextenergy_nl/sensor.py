@@ -2,7 +2,9 @@
 
 The hourly history lives in long-term statistics (see coordinator.py) and shows
 up in the Energy dashboard. These sensors exist so the last day's figures can be
-used in automations and on dashboards without querying statistics.
+used in automations and on dashboards without querying statistics. They carry no
+state class on purpose: a value that is replaced by the next day's total is a
+snapshot, not a meter reading, and must not feed the recorder's own statistics.
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
-    SensorStateClass,
 )
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant
@@ -48,7 +49,6 @@ SENSORS: tuple[NextEnergySensorDescription, ...] = (
         key="electricity_last_day",
         translation_key="electricity_last_day",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=2,
         value_fn=lambda u: u.totals.electricity_kwh,
@@ -58,7 +58,6 @@ SENSORS: tuple[NextEnergySensorDescription, ...] = (
         key="return_last_day",
         translation_key="return_last_day",
         device_class=SensorDeviceClass.ENERGY,
-        state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=2,
         value_fn=lambda u: u.totals.return_kwh,
@@ -68,7 +67,6 @@ SENSORS: tuple[NextEnergySensorDescription, ...] = (
         key="gas_last_day",
         translation_key="gas_last_day",
         device_class=SensorDeviceClass.GAS,
-        state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
         suggested_display_precision=3,
         value_fn=lambda u: u.totals.gas_m3,

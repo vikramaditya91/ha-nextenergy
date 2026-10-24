@@ -19,7 +19,8 @@
     },
     "error": {
       "invalid_auth": "NextEnergy accepteert het e-mailadres of wachtwoord niet.",
-      "cannot_connect": "Kan de NextEnergy-backend niet bereiken."
+      "cannot_connect": "Kan de NextEnergy-backend niet bereiken.",
+      "no_contract": "Dit account heeft geen energiecontract om verbruik van te lezen."
     },
     "abort": {
       "already_configured": "Dit contract is al ingesteld.",

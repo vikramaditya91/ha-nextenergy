@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -21,7 +21,14 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .api import AuthenticationError, Contract, DayUsage, NextEnergyClient, NextEnergyError
+from .api import (
+    NEXTENERGY_TZ,
+    AuthenticationError,
+    Contract,
+    DayUsage,
+    NextEnergyClient,
+    NextEnergyError,
+)
 from .const import DOMAIN, INITIAL_BACKFILL_DAYS, RECHECK_DAYS, UPDATE_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
@@ -131,7 +138,13 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
         return NextEnergyData(self.contract, latest)
 
     async def _import_new_days(self) -> DayUsage | None:
-        """Import every day since the last imported one, re-checking the last few."""
+        """Import every day since the last imported one, re-checking the last few.
+
+        Days are NextEnergy's days, i.e. Dutch local time, regardless of the
+        Home Assistant time zone. Running sums are carried in memory across the
+        days of one import: the recorder commits writes asynchronously, so
+        reading the sum back between consecutive days could see a stale value.
+        """
         meta = self._metadata()
         if not meta:
             return None
@@ -139,40 +152,49 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
         last = await get_instance(self.hass).async_add_executor_job(
             get_last_statistics, self.hass, 1, anchor_id, True, {"sum"}
         )
-        yesterday = dt_util.now().date() - timedelta(days=1)
+        yesterday = datetime.now(NEXTENERGY_TZ).date() - timedelta(days=1)
         if last.get(anchor_id):
             last_start = dt_util.utc_from_timestamp(last[anchor_id][0]["start"])
-            first_day = dt_util.as_local(last_start).date() - timedelta(days=RECHECK_DAYS - 1)
+            first_day = last_start.astimezone(NEXTENERGY_TZ).date() - timedelta(
+                days=RECHECK_DAYS - 1
+            )
         else:
             first_day = yesterday - timedelta(days=INITIAL_BACKFILL_DAYS - 1)
         if self.contract.start and first_day < self.contract.start:
             first_day = self.contract.start
+        if first_day > yesterday:
+            return None
 
+        running = await self._sums_before(meta, _midnight(first_day))
         latest: DayUsage | None = None
         day = first_day
         while day <= yesterday:
             usage = await self.client.get_usage(self.contract.contract_id, day)
             if usage.has_data:
-                await self._write_day(meta, usage)
+                self._write_day(meta, usage, running)
                 latest = usage
             else:
                 _LOGGER.debug("%s has no data yet (status %r)", day, usage.status)
             day += timedelta(days=1)
         return latest
 
-    async def _write_day(self, meta: dict[str, StatisticMetaData], usage: DayUsage) -> None:
-        """Write one day's hourly statistics, continuing each running sum.
+    def _write_day(
+        self,
+        meta: dict[str, StatisticMetaData],
+        usage: DayUsage,
+        running: dict[str, Decimal],
+    ) -> None:
+        """Write one day's hourly statistics, advancing each running sum in place.
+
+        Every hour of the day is written, with 0 for hours NextEnergy left out,
+        so a re-import fully replaces what was stored before. A series with no
+        data at all for the day (for example gas on a day where only electricity
+        arrived) is left untouched rather than zeroed.
 
         Cost series carry NextEnergy's all-in day total (energy, tax and fixed
-        costs), spread over the hours in proportion to the volume.
-
-        Interval values are grouped per hour. When NextEnergy only gives a day
-        total (non-smart meter, or data points missing), the total is booked on
-        the day's first hour so the Energy dashboard still shows the right daily
-        amount.
+        costs), spread over the hours in proportion to the volume. When only a
+        day total is known, it is booked on the first hour.
         """
-        tz = dt_util.get_default_time_zone()
-        start_of_day = datetime.combine(usage.day, datetime.min.time(), tzinfo=tz)
         series: dict[str, tuple[dict, Decimal]] = {
             "electricity": (usage.electricity, usage.totals.electricity_kwh),
             "electricity_cost": (
@@ -196,56 +218,75 @@ class NextEnergyCoordinator(DataUpdateCoordinator[NextEnergyData]):
         }
         for kind, metadata in meta.items():
             points, total = series[kind]
-            hourly = _per_hour(points, total)
+            hourly = _per_hour(usage.day, points, total)
             if not hourly:
                 continue
-            base = await self._sum_before(metadata["statistic_id"], start_of_day)
             stats: list[StatisticData] = []
-            running = base
-            for hour in range(24):
-                amount = hourly.get(hour)
-                if amount is None:
-                    continue
-                running += amount
+            for start, amount in sorted(hourly.items()):
+                running[kind] += amount
                 stats.append(
-                    StatisticData(
-                        start=start_of_day + timedelta(hours=hour),
-                        state=float(amount),
-                        sum=float(running),
-                    )
+                    StatisticData(start=start, state=float(amount), sum=float(running[kind]))
                 )
             async_add_external_statistics(self.hass, metadata, stats)
 
-    async def _sum_before(self, statistic_id: str, start: datetime) -> Decimal:
-        """Running sum just before ``start``, so re-imported days do not double count."""
+    async def _sums_before(
+        self, meta: dict[str, StatisticMetaData], start: datetime
+    ) -> dict[str, Decimal]:
+        """Each series' running sum just before ``start``.
 
-        def _query() -> Decimal:
-            rows = statistics_during_period(
-                self.hass,
-                start - timedelta(days=400),
-                start,
-                {statistic_id},
-                "hour",
-                None,
-                {"sum"},
-            ).get(statistic_id)
-            if not rows:
-                return Decimal(0)
-            return Decimal(str(rows[-1]["sum"] or 0))
+        Re-imports only reach back a few days, so the row before ``start`` is
+        recent when it exists. When nothing precedes ``start`` the series either
+        starts here (sum 0) or its last row is older than the search window, in
+        which case the last row overall is the right base.
+        """
+        ids = {m["statistic_id"] for m in meta.values()}
+
+        def _query() -> dict[str, Decimal]:
+            before = statistics_during_period(
+                self.hass, start - timedelta(days=60), start, ids, "hour", None, {"sum"}
+            )
+            sums: dict[str, Decimal] = {}
+            for kind, metadata in meta.items():
+                sid = metadata["statistic_id"]
+                rows = before.get(sid)
+                if not rows:
+                    last = get_last_statistics(self.hass, 1, sid, True, {"sum"}).get(sid)
+                    if last and dt_util.utc_from_timestamp(last[0]["start"]) < start:
+                        rows = last
+                sums[kind] = Decimal(str(rows[-1]["sum"] or 0)) if rows else Decimal(0)
+            return sums
 
         return await get_instance(self.hass).async_add_executor_job(_query)
 
 
-def _per_hour(points: dict, total: Decimal) -> dict[int, Decimal]:
-    """Collapse interval values into hours; fall back to the day total on hour 0."""
-    if points:
-        hourly: dict[int, Decimal] = {}
-        for when, value in points.items():
-            hourly[when.hour] = hourly.get(when.hour, Decimal(0)) + value
+def _midnight(day: date) -> datetime:
+    return datetime.combine(day, datetime.min.time(), tzinfo=NEXTENERGY_TZ)
+
+
+def _per_hour(day: date, points: dict, total: Decimal) -> dict[datetime, Decimal]:
+    """Map a day's values onto the real hours of that day.
+
+    Hours are keyed by the aware start instant, built from NextEnergy's local
+    labels. On the autumn clock change the repeated 02:00 label lands on one
+    instant and the values add up; on the spring change the skipped hour is
+    folded into the next one. Missing hours are written as 0 so a re-import
+    overwrites what was there. Without any hourly points the day total goes on
+    the first hour.
+    """
+    if not points and not total:
+        return {}
+    hourly: dict[datetime, Decimal] = {}
+    for hour in range(24):
+        start = datetime.combine(day, time(hour), tzinfo=NEXTENERGY_TZ)
+        key = start.astimezone(UTC)
+        hourly.setdefault(key, Decimal(0))
+    if not points:
+        hourly[min(hourly)] = total
         return hourly
-    if total:
-        return {0: total}
-    return {}
+    for when, value in points.items():
+        key = datetime.combine(day, when, tzinfo=NEXTENERGY_TZ).astimezone(UTC)
+        hourly[key] = hourly.get(key, Decimal(0)) + value
+    return hourly
 
 
 def _scale(points: dict, volume: Decimal, cost: Decimal) -> dict:

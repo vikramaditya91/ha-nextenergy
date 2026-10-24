@@ -19,7 +19,8 @@
     },
     "error": {
       "invalid_auth": "NextEnergy rejected the e-mail address or password.",
-      "cannot_connect": "Could not reach the NextEnergy backend."
+      "cannot_connect": "Could not reach the NextEnergy backend.",
+      "no_contract": "This account has no energy contract to read usage for."
     },
     "abort": {
       "already_configured": "This contract is already set up.",
