@@ -29,6 +29,8 @@ from .api import Contract, DayUsage
 from .const import DOMAIN
 from .coordinator import NextEnergyConfigEntry, NextEnergyCoordinator
 
+CENT = Decimal("0.01")
+
 
 @dataclass(frozen=True, kw_only=True)
 class NextEnergySensorDescription(SensorEntityDescription):
@@ -78,7 +80,7 @@ SENSORS: tuple[NextEnergySensorDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         native_unit_of_measurement="EUR",
         suggested_display_precision=2,
-        value_fn=lambda u: u.totals.electricity_total_eur + u.totals.gas_total_eur,
+        value_fn=lambda u: (u.totals.electricity_total_eur + u.totals.gas_total_eur).quantize(CENT),
     ),
 )
 
